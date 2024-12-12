@@ -2,37 +2,25 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Reflection;
 using HttpServerCSharp;
 
 namespace HttpServerCSharp {
-
-    public enum STATUS_CODE: Int16 {
-        INVALID_HTTP_VERSION = 1,
-        INVALID_URL_PATH = 2,
-        VALID_URL_PATH = 3,
-        INVALID_HTTP_VERB = 4,
-        DISCRETE = 5,
-        CONTINOUS = 6
-    }
-
-    delegate object RouteHandler(object paramter);
-
-    public class HttpServer {
+    public class HttpServer : macros {
+        private TcpCommunication _tcpCommunication;
+        private RouterHandler _routeHandler;
+        private MiscFunc _miscFunc;
         private readonly int _fPort;
         private readonly IPAddress _fAddr;
         // ReSharper disable once FieldCanBeMadeReadOnly.Local
-        private byte[] _rcvBuffer = new byte[1024];
-        private byte[] _sndBuffer = new byte[1024];
         private readonly TcpListener _serverListener;
         private STATUS_CODE statusCode;
         private string cliMsg;
         private string[] validUrls;
         private STATUS_CODE transmissionProtocol;
         private STATUS_CODE receptionProtocol;
-        private readonly List<string?> _clientConnectedList = new List<string?>();
-        private readonly Dictionary<string, MethodInfo> _routeHandler;
-        private readonly object _controllerInstance;
+        private readonly List<string?> _clientConnectedList;
 
         public HttpServer(
             object controllerInstance,
@@ -51,10 +39,13 @@ namespace HttpServerCSharp {
             validUrls[1] = "/home";
             validUrls[2] = "/";
 
-            _routeHandler = new Dictionary<string, MethodInfo>();
-            _controllerInstance = controllerInstance;
+            // _routeHandler = new Dictionary<string, MethodInfo>();
+            _routeHandler = new RouterHandler(controllerInstance);
+            _tcpCommunication = new TcpCommunication();
+            _clientConnectedList = new List<string?>();
+            _miscFunc = new MiscFunc();
             
-            RegisterRoutes(_controllerInstance);
+            _routeHandler.RegisterRoutes();
 
             bool usrPort = port != 0 ? true : false;
             bool usrAddr = ipAddr != "" ? true : false;
@@ -64,45 +55,10 @@ namespace HttpServerCSharp {
                 localaddr: _fAddr,
                 port: _fPort
             );
+            
             Console.WriteLine("Starting Local HTTP Server....");
             Console.WriteLine("Connect to server at http://{0}:{1}", _fAddr, _fPort);
             _serverListener.Start();
-        }
-
-        private void RegisterRoutes(object controller)
-        {
-            var methods = controller.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            foreach (var method in methods)
-            {
-                var attribute = method.GetCustomAttribute<RouteAttribute>();
-                if (attribute != null)
-                {
-                    _routeHandler[attribute.Path] = method;
-                    Console.WriteLine($"Registered Route: {attribute.Path} => {method.Name}");
-                }
-            }
-        }
-        
-        public string HandleRequest_ViaRouteHandler(string urlPath, NetworkStream networkStream) {
-            if (_routeHandler.TryGetValue(urlPath, out var method)) {
-                Console.WriteLine($"Handling Request for {urlPath}");
-                object? response = method.Invoke(_controllerInstance, null);
-                string rsvStr = response?.ToString();
-                Console.WriteLine("Response Received: {0}", response.ToString());
-                string responseString = string.Format("HTTP/1.1 200 OK\r\nContent-Length: {0}\r\n\r\n{1}", rsvStr.Length, rsvStr); 
-                Console.WriteLine("Message which server will be sending to the client is: {0}", responseString);
-                return responseString;
-            } else {
-                string rsvStr = "HTTP/1.1 404 Not Found\r\n\r\nPath not found.";
-                return "";
-            }
-        }
-
-        private void SendResponse(NetworkStream networkStream, string response)
-        {
-            byte[] responseBytes = Encoding.UTF8.GetBytes(response);
-            networkStream.Write(responseBytes, 0, responseBytes.Length);
-            networkStream.Flush();
         }
         
         public STATUS_CODE HttpParser(
@@ -128,43 +84,6 @@ namespace HttpServerCSharp {
             return STATUS_CODE.INVALID_HTTP_VERB;
         }
 
-        public string ReadAllBytes(NetworkStream netStream) {
-            int bytesRecieved = netStream.Read(_rcvBuffer);
-            string data = Encoding.UTF8.GetString(_rcvBuffer.AsSpan(0, bytesRecieved));
-            return data;
-        }
-
-        public string ReadDataByteByByte(NetworkStream netStream) {
-            StringBuilder data = new StringBuilder();
-            while (netStream.DataAvailable) {
-                int byteData = netStream.ReadByte();
-                if (byteData != -1) {
-                    Console.WriteLine("Incooming Byte: {0} | Concerted Char: {1}", byteData, (char)byteData);
-                    data.Append((char)byteData);
-                } else {
-                    break;
-                }
-            }
-            return data.ToString();
-        }
-
-        public void SendAllBytes(NetworkStream netstream, string srvRsp) {
-            _sndBuffer = Encoding.UTF8.GetBytes(srvRsp);
-            netstream.Write(_sndBuffer, 0, _sndBuffer.Length);
-        }
-
-        public void SendDataByteByByte(NetworkStream netStream, string srvRsp) {
-            _sndBuffer = Encoding.UTF8.GetBytes(srvRsp);
-            foreach (byte b in _sndBuffer) {
-                netStream.WriteByte(b);
-            }
-        }
-
-        public void urlResolver(string urlPath) {
-
-            return;
-        }
-
         public void RequestParser(string cliMsg, NetworkStream networkStream) {
             List<string> requestList = cliMsg.Split("\r\n").ToList();
             string[] headerStrings = requestList[0].Split(" ");
@@ -182,21 +101,21 @@ namespace HttpServerCSharp {
 
             string srvMsg = "";
             if (responseStatus == STATUS_CODE.VALID_URL_PATH) {
-                srvMsg = HandleRequest_ViaRouteHandler(_urlPath, networkStream);
+                srvMsg = _routeHandler.HandleRequest_ViaRouteHandler(_urlPath, networkStream);
             } else if (responseStatus == STATUS_CODE.INVALID_HTTP_VERSION) {
-                srvMsg = "HTTP/1.1 400 Unsupported HTTP Version\r\n\r\n";
+                srvMsg = _miscFunc.retStr(errCode: "405 Method Not Allowed", errMsg: "Unsupported HTTP version");
             } else if (responseStatus == STATUS_CODE.INVALID_HTTP_VERB) {
-                srvMsg = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
+                srvMsg = _miscFunc.retStr(errCode: "405 Method Not Allowed", errMsg: "Unsupported HTTP Verb");
             } else if (responseStatus == STATUS_CODE.INVALID_URL_PATH) {
-                srvMsg = "HTTP/1.1 404 Not Found\r\n\r\n";
+                srvMsg = _miscFunc.retStr(errCode: "404 Not Found", errMsg: "Invalid URL Path");
             } else {
-                srvMsg = "HTTP/1.1 500 Internal Server Error\r\n\r\n";
+                srvMsg = _miscFunc.retStr(errCode: "500 Internal Server Error", errMsg: "whoooppssie we dont know the error :3");
             }
 
             if (transmissionProtocol == STATUS_CODE.CONTINOUS) {
-                SendAllBytes(networkStream, srvMsg);
+                _tcpCommunication.SendAllBytes(networkStream, srvMsg);
             } else if (transmissionProtocol == STATUS_CODE.DISCRETE) {
-                SendDataByteByByte(networkStream, srvMsg);
+                _tcpCommunication.SendDataByteByByte(networkStream, srvMsg);
             }
         }
 
@@ -211,9 +130,9 @@ namespace HttpServerCSharp {
             netStream.ReadTimeout = 2500;
             netStream.WriteTimeout = 250;
             if (receptionProtocol == STATUS_CODE.CONTINOUS) {
-                cliMsg = ReadAllBytes(netStream);
+                cliMsg = _tcpCommunication.ReadAllBytes(netStream);
             } if (receptionProtocol == STATUS_CODE.DISCRETE) {
-                cliMsg = ReadDataByteByByte(netStream);
+                cliMsg = _tcpCommunication.ReadDataByteByByte(netStream);
             }
             Console.WriteLine("Client Sent: \n{0}", cliMsg);
 
@@ -228,7 +147,8 @@ namespace HttpServerCSharp {
                 TcpClient tcpClient = _serverListener.AcceptTcpClient();
                 if (
                     tcpClient is { Client.Connected: true }
-                ) {
+                )
+                {
                     string? clientEndpoint = tcpClient.Client.RemoteEndPoint?.ToString();
                     if (clientEndpoint != null && clientEndpoint != null) {
                         _clientConnectedList.Add(clientEndpoint);
