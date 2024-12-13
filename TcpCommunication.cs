@@ -13,30 +13,30 @@ public class TcpCommunication
         _sndBuffer = new byte[1024];
     }
     
-    public void SendAllBytes(NetworkStream netstream, string srvRsp) {
+    public async Task SendAllBytes(NetworkStream netstream, string srvRsp) {
         _sndBuffer = Encoding.UTF8.GetBytes(srvRsp);
-        netstream.Write(_sndBuffer, 0, _sndBuffer.Length);
+        await netstream.WriteAsync(_sndBuffer, 0, _sndBuffer.Length);
     }
 
-    public void SendDataByteByByte(NetworkStream netStream, string srvRsp) {
+    public async Task SendDataByteByByte(NetworkStream netStream, string srvRsp) {
         _sndBuffer = Encoding.UTF8.GetBytes(srvRsp);
         foreach (byte b in _sndBuffer) {
-            netStream.WriteByte(b);
+            await netStream.WriteAsync(new[] { b }, 0, 1);
         }
     }
-    
-    public string ReadAllBytes(NetworkStream netStream) {
-        int bytesRecieved = netStream.Read(_rcvBuffer);
+
+    public async Task<string> ReadAllBytes(NetworkStream netStream) {
+        int bytesRecieved = await netStream.ReadAsync(_rcvBuffer, 0, _rcvBuffer.Length);
         string data = Encoding.UTF8.GetString(_rcvBuffer.AsSpan(0, bytesRecieved));
         return data;
     }
 
-    public string ReadDataByteByByte(NetworkStream netStream) {
+    public async Task<string> ReadDataByteByByte(NetworkStream netStream) {
         StringBuilder data = new StringBuilder();
         while (netStream.DataAvailable) {
-            int byteData = netStream.ReadByte();
+            int byteData = await Task.Run(() => netStream.ReadByte()); // ReadByte doesn't have async version
             if (byteData != -1) {
-                Console.WriteLine("Incooming Byte: {0} | Concerted Char: {1}", byteData, (char)byteData);
+                Console.WriteLine("Incoming Byte: {0} | Converted Char: {1}", byteData, (char)byteData);
                 data.Append((char)byteData);
             } else {
                 break;

@@ -10,7 +10,8 @@ namespace HttpServerCSharp {
             HttpServer server = new HttpServer(
                 controllerInstance: controller,
                 ipAddr: "127.0.0.1",
-                port: 3601
+                port: 3601,
+                _concurrency: true
             );
             
             server.HandleRequest();

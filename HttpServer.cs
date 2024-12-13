@@ -5,45 +5,61 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Reflection;
 using HttpServerCSharp;
+using System.Threading;
+using System.Threading.Tasks;
+
 
 namespace HttpServerCSharp {
     public class HttpServer : macros {
-        private TcpCommunication _tcpCommunication;
-        private RouterHandler _routeHandler;
-        private MiscFunc _miscFunc;
-        private readonly int _fPort;
-        private readonly IPAddress _fAddr;
-        // ReSharper disable once FieldCanBeMadeReadOnly.Local
-        private readonly TcpListener _serverListener;
-        private STATUS_CODE statusCode;
-        private string cliMsg;
-        private string[] validUrls;
-        private STATUS_CODE transmissionProtocol;
-        private STATUS_CODE receptionProtocol;
+        private readonly SemaphoreSlim _concurrencySemaphore;
         private readonly List<string?> _clientConnectedList;
-
+        private readonly TcpCommunication _tcpCommunication;
+        private readonly STATUS_CODE _transmissionProtocol;
+        private readonly int MAX_CONCURRENCY_COUNT = 10;
+        private readonly STATUS_CODE _receptionProtocol;
+        private readonly RouterHandler _routeHandler;
+        private readonly TcpListener _serverListener;
+        private readonly object _concurrencyLock;
+        private readonly string[] _validUrls;
+        private readonly MiscFunc _miscFunc;
+        private readonly bool _concurrency;
+        private readonly IPAddress _fAddr;
+        private int _concurrencyCount;
+        private readonly int _fPort;
+        private string _cliMsg;
+        
         public HttpServer(
             object controllerInstance,
             int port = 0,
             string ipAddr = "",
             STATUS_CODE usrTransmissionType = STATUS_CODE.CONTINOUS,
-            STATUS_CODE usrReceptionProtocol = STATUS_CODE.CONTINOUS
+            STATUS_CODE usrReceptionProtocol = STATUS_CODE.CONTINOUS,
+            bool _concurrency = false,
+            int _maxConcurrencyCount = 10
         ) {
-            cliMsg = "";
+            _cliMsg = "";
 
-            transmissionProtocol = usrTransmissionType;
-            receptionProtocol = usrReceptionProtocol;
+            _transmissionProtocol = usrTransmissionType;
+            _receptionProtocol = usrReceptionProtocol;
 
-            validUrls = new string[3];
-            validUrls[0] = "/index";
-            validUrls[1] = "/home";
-            validUrls[2] = "/";
+            _validUrls = new string[3];
+            _validUrls[0] = "/index";
+            _validUrls[1] = "/home";
+            _validUrls[2] = "/";
 
             // _routeHandler = new Dictionary<string, MethodInfo>();
             _routeHandler = new RouterHandler(controllerInstance);
             _tcpCommunication = new TcpCommunication();
             _clientConnectedList = new List<string?>();
             _miscFunc = new MiscFunc();
+            _concurrencyCount = 0;
+            _concurrencyLock = new object();
+            this._concurrency = _concurrency;
+            MAX_CONCURRENCY_COUNT = _maxConcurrencyCount;
+            
+            if (this._concurrency) {
+                _concurrencySemaphore = new SemaphoreSlim(MAX_CONCURRENCY_COUNT);
+            }
             
             _routeHandler.RegisterRoutes();
 
@@ -72,7 +88,7 @@ namespace HttpServerCSharp {
                 return STATUS_CODE.INVALID_HTTP_VERSION;
             }
             if (httpVerb == "GET") {
-                bool isValidPath = Array.Exists(validUrls, element => element == urlPath);
+                bool isValidPath = Array.Exists(_validUrls, element => element == urlPath);
                 if (isValidPath) {
                     return STATUS_CODE.VALID_URL_PATH;
                 }
@@ -84,7 +100,7 @@ namespace HttpServerCSharp {
             return STATUS_CODE.INVALID_HTTP_VERB;
         }
 
-        public void RequestParser(string cliMsg, NetworkStream networkStream) {
+        public async Task RequestParser(string cliMsg, NetworkStream networkStream) {
             List<string> requestList = cliMsg.Split("\r\n").ToList();
             string[] headerStrings = requestList[0].Split(" ");
 
@@ -101,7 +117,7 @@ namespace HttpServerCSharp {
 
             string srvMsg = "";
             if (responseStatus == STATUS_CODE.VALID_URL_PATH) {
-                srvMsg = _routeHandler.HandleRequest_ViaRouteHandler(_urlPath, networkStream);
+                srvMsg = await _routeHandler.HandleRequest_ViaRouteHandler(_urlPath, networkStream);
             } else if (responseStatus == STATUS_CODE.INVALID_HTTP_VERSION) {
                 srvMsg = _miscFunc.retStr(errCode: "405 Method Not Allowed", errMsg: "Unsupported HTTP version");
             } else if (responseStatus == STATUS_CODE.INVALID_HTTP_VERB) {
@@ -112,14 +128,14 @@ namespace HttpServerCSharp {
                 srvMsg = _miscFunc.retStr(errCode: "500 Internal Server Error", errMsg: "whoooppssie we dont know the error :3");
             }
 
-            if (transmissionProtocol == STATUS_CODE.CONTINOUS) {
-                _tcpCommunication.SendAllBytes(networkStream, srvMsg);
-            } else if (transmissionProtocol == STATUS_CODE.DISCRETE) {
-                _tcpCommunication.SendDataByteByByte(networkStream, srvMsg);
+            if (_transmissionProtocol == STATUS_CODE.CONTINOUS) {
+                await _tcpCommunication.SendAllBytes(networkStream, srvMsg);
+            } else if (_transmissionProtocol == STATUS_CODE.DISCRETE) {
+                await _tcpCommunication.SendDataByteByByte(networkStream, srvMsg);
             }
         }
 
-        public void HandleClient(TcpClient client) {
+        public async Task HandleClient(TcpClient client) {
             // check if client is null i.e. wrongful call to this function
             if (client == null) {
                 throw new ArgumentNullException(nameof(client));
@@ -129,42 +145,77 @@ namespace HttpServerCSharp {
             using NetworkStream netStream = client.GetStream();
             netStream.ReadTimeout = 2500;
             netStream.WriteTimeout = 250;
-            if (receptionProtocol == STATUS_CODE.CONTINOUS) {
-                cliMsg = _tcpCommunication.ReadAllBytes(netStream);
-            } if (receptionProtocol == STATUS_CODE.DISCRETE) {
-                cliMsg = _tcpCommunication.ReadDataByteByByte(netStream);
+            if (_receptionProtocol == STATUS_CODE.CONTINOUS) {
+                _cliMsg = await _tcpCommunication.ReadAllBytes(netStream);
+            } if (_receptionProtocol == STATUS_CODE.DISCRETE) {
+                _cliMsg = await _tcpCommunication.ReadDataByteByByte(netStream);
             }
-            Console.WriteLine("Client Sent: \n{0}", cliMsg);
+            Console.WriteLine("Client Sent: \n{0}", _cliMsg);
 
-            RequestParser(cliMsg, netStream);
+            await RequestParser(_cliMsg, netStream);
             return;
         }
 
-        public void HandleRequest() {
+        public async Task RequestHandler(TcpClient client) {
+            try {
+                lock (_concurrencyLock) {
+                    _concurrencyCount++;
+                    Console.WriteLine("Active Requst: \n{0}", _concurrencyCount);
+                }
+                string? clientEndpoint = client.Client.RemoteEndPoint?.ToString();
+                if (clientEndpoint != null && clientEndpoint != null) {
+                    _clientConnectedList.Add(clientEndpoint);
+                    Console.WriteLine("A New Client Connected to Server....");
+                    Console.WriteLine("Client info:\n{0}", clientEndpoint);
+                    await HandleClient(client);
+                }
+            } catch (Exception e) {
+                Console.WriteLine(e);
+                throw;
+            } finally {
+                lock (_concurrencyLock) {
+                    _concurrencyCount--;
+                }
+                client.Close();
+            }
+        }
+        
+        public async void HandleRequest() {
             bool isRunning = true;
             // ReSharper disable once LoopVariableIsNeverChangedInsideLoop
             while (isRunning) {
                 TcpClient tcpClient = _serverListener.AcceptTcpClient();
                 if (
                     tcpClient is { Client.Connected: true }
-                )
-                {
-                    string? clientEndpoint = tcpClient.Client.RemoteEndPoint?.ToString();
-                    if (clientEndpoint != null && clientEndpoint != null) {
-                        _clientConnectedList.Add(clientEndpoint);
-                        Console.WriteLine("A New Client Connected to Server....");
-                        Console.WriteLine("Client info:\n{0}", clientEndpoint);
-                        HandleClient(tcpClient);
+                ) {
+                    if (_concurrency) {
+                        // try to go with timeout semaphore 
+                        if (await _concurrencySemaphore.WaitAsync(TimeSpan.FromSeconds(30)))
+                        {
+                            _ = Task.Run(async () => {
+                                try {
+                                    await RequestHandler(tcpClient);
+                                } catch (Exception e) {
+                                    Console.WriteLine(e);
+                                    throw;
+                                } finally
+                                {
+                                    _concurrencySemaphore.Release();
+                                }
+                            });
+                        }
+                    } else {
+                        await RequestHandler(tcpClient);
                     }
                 }
-                tcpClient.Close();
             }
             isRunning = false;
             _serverListener.Stop();
         }
 
-        public TcpListener GeTcpListener() {
-            return _serverListener;
+        public List<string> getClientConnectedList() {
+            return _clientConnectedList;
         }
+        
     }
 }
