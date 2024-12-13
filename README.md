@@ -1,4 +1,6 @@
-﻿# Aurora
+﻿![alt text](<AURORA (1).png>)
+
+# Aurora
 
 ## Introduction
 
